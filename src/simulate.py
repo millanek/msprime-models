@@ -20,7 +20,9 @@ def parse_species_tree(
         species_tree=None,
         branch_length_units="gen",
         Ne=None,
-        generation_time=None):
+        generation_time=None,
+        migration_matrix=None,
+        geneFlowPeriod=None):
     """
     Method to parse species trees in Newick
     (https://en.wikipedia.org/wiki/Newick_format) format.
@@ -92,6 +94,8 @@ def parse_species_tree(
     generations_per_branch_length_unit = get_generations_per_branch_length_unit(
         branch_length_units, generation_time
         )
+    # Get the gene flow period limit parameter in the time units of the tree
+    geneFlowPeriodInTreeUnits = geneFlowPeriod / generations_per_branch_length_unit
 
     # Read the input file.
     species_tree_lines = species_tree.splitlines(False)
@@ -128,23 +132,76 @@ def parse_species_tree(
     sources = []
     destinations = []
     divergence_times = []
+    allDescendantsOfDestinations = []
+    allDescendantsOfSources = []
     for node in root.walk():
         if node.is_leaf is False:
             name_indices = []
+            leaf_names_of_nodeDescendants = []
             for descendants in node.descendants:
                 leaf_names = (descendants.get_leaf_names())
                 name_indices.append(species_ids.index(sorted(leaf_names)[0]))
-            new_destination = sorted(name_indices)[0]
-            name_indices.remove(sorted(name_indices)[0])
-            for new_source in name_indices:
-                sources.append(new_source)
+                leaf_names_of_nodeDescendants.append(sorted(leaf_names))
+            
+            s = sorted(zip(name_indices, leaf_names_of_nodeDescendants))
+            name_indices, leaf_names_of_nodeDescendants = map(list, zip(*s))
+            new_destination = name_indices[0]
+            name_indices.remove(name_indices[0])
+            newDescendantsOfDestination = leaf_names_of_nodeDescendants[0]
+            leaf_names_of_nodeDescendants.remove(leaf_names_of_nodeDescendants[0])
+            for x in range(len(name_indices)):
+                sources.append(name_indices[x])
+                allDescendantsOfSources.append(leaf_names_of_nodeDescendants[x])
                 destinations.append(new_destination)
+                allDescendantsOfDestinations.append(newDescendantsOfDestination)
                 divergence_times.append(node.height)
 
     # Sort the lists source_sets, destinations, and divergence_times
     # according to divergence_time.
-    s = sorted(zip(divergence_times, sources, destinations))
-    divergence_times, sources, destinations = map(list, zip(*s))
+    s = sorted(zip(divergence_times, sources, destinations, allDescendantsOfSources, allDescendantsOfDestinations))
+    divergence_times, sources, destinations, allDescendantsOfSources, allDescendantsOfDestinations = map(list, zip(*s))
+    
+   
+   #DEBUG STUFF:
+#    print("Batmin: " + str(species_ids.index("Batmin")))
+#    print("Batleo: " + str(species_ids.index("Batleo")))
+#    print("Batgra: " + str(species_ids.index("Batgra")))
+#    print("Batfer: " + str(species_ids.index("Batfer")))
+#    print("Bathor: " + str(species_ids.index("Bathor")))
+#    print("Batfas: " + str(species_ids.index("Batfas")))
+#    print("Batvit: " + str(species_ids.index("Batvit")))
+    
+    
+    for x in range(len(divergence_times)):
+        # Start of gene flow ('Start' in the sense of looking backwards in coalescent terms)
+        geneFlowStart =  divergence_times[x] - geneFlowPeriodInTreeUnits
+        
+        if geneFlowStart < 0.0:
+            geneFlowStart = 0.0
+        else:
+            descendantsToRemove = [] # These should not have any gene-flow, because they do not exist within the geneFlowPeriod for this node
+            for s in allDescendantsOfSources[x]:
+                speciesID = species_ids.index(s)
+                for y in range(len(divergence_times)):
+                    if speciesID == sources[y]:
+                        if divergence_times[y] <= geneFlowStart:
+                            descendantsToRemove.append(s)
+            
+            for r in descendantsToRemove:
+                allDescendantsOfSources[x].remove(r)
+            
+            descendantsToRemove = []
+            
+            for s in allDescendantsOfDestinations[x]:
+                speciesID = species_ids.index(s)
+                for y in range(len(divergence_times)):
+                    if speciesID == sources[y]:
+                        if divergence_times[y] <= geneFlowStart:
+                            descendantsToRemove.append(s)
+                            
+            for r in descendantsToRemove:
+                allDescendantsOfDestinations[x].remove(r)
+    
 
     # Define the species/population tree for msprime.
     population_configurations = []
@@ -153,12 +210,66 @@ def parse_species_tree(
             msprime.PopulationConfiguration(
                 initial_size=Ne))
     demographic_events = []
+    demographic_event_times = []
     for x in range(len(divergence_times)):
         demographic_events.append(
             msprime.MassMigration(
                 time=divergence_times[x]*generations_per_branch_length_unit,
                 source=sources[x],
                 destination=destinations[x]))
+        demographic_event_times.append(divergence_times[x])
+        
+        
+        # Start of gene flow ('Start' in the sense of looking backwards in coalescent terms)
+        geneFlowStart =  divergence_times[x] - geneFlowPeriodInTreeUnits
+    #DEBUG STUFF:
+#        print("geneFlowPeriodInTreeUnits: ")
+#        print(geneFlowPeriodInTreeUnits)
+#        print("divergence_times[x]: ")
+#        print(divergence_times[x])
+#        print("geneFlowStart: ")
+#        print(geneFlowStart)
+        
+        if geneFlowStart < 0.0:
+            geneFlowStart = 0.0
+ #DEBUG STUFF:
+#        print("geneFlowStart: ")
+#        print(geneFlowStart)
+#
+#        print("")
+        
+        # Now loop over all descendants of this node which should have gene-flow among them and set that
+        for d in allDescendantsOfDestinations[x]:
+            for s in allDescendantsOfSources[x]:
+    #DEBUG STUFF:
+#               if divergence_times[x] > 1.5:
+#                    print(d)
+#                    print(s)
+#                    print(species_ids[8])
+#                    print(species_ids[67])
+#                    print(species_ids[68])
+#                    sys.exit(1)
+                if migration_matrix[species_ids.index(s)][species_ids.index(d)] > 0.0:
+                    demographic_events.append(
+                    msprime.MigrationRateChange(
+                        time=geneFlowStart*generations_per_branch_length_unit,
+                        rate=migration_matrix[species_ids.index(s)][species_ids.index(d)],
+                        matrix_index=(species_ids.index(s), species_ids.index(d))))
+                    demographic_event_times.append(geneFlowStart)
+                    
+                if migration_matrix[species_ids.index(d)][species_ids.index(s)] > 0.0:
+                    demographic_events.append(
+                    msprime.MigrationRateChange(
+                        time=geneFlowStart*generations_per_branch_length_unit,
+                        rate=migration_matrix[species_ids.index(d)][species_ids.index(s)],
+                        matrix_index=(species_ids.index(d), species_ids.index(s))))
+                        
+                    demographic_event_times.append(geneFlowStart)
+                    
+                    # Maybe the migration rate chages starting at time 0.0 are better supplied in the initial matrix and not as demographic events???
+                    
+                    # Of course better if the rates in internal branches were averages, not just randomply selected 'surviving' ones
+        
         for y in range(len(root.get_leaves())):
             if y != sources[x]:
                 demographic_events.append(
@@ -166,14 +277,28 @@ def parse_species_tree(
                         time=divergence_times[x]*generations_per_branch_length_unit,
                         rate=0,
                         matrix_index=(sources[x], y)))
+                demographic_event_times.append(divergence_times[x])
+                
                 demographic_events.append(
                     msprime.MigrationRateChange(
                         time=divergence_times[x]*generations_per_branch_length_unit,
                         rate=0,
                         matrix_index=(y, sources[x])))
+                demographic_event_times.append(divergence_times[x])
+                
+    
+    # Sort the list demographic_events according to demographic_event_times (the "zip" approach does't work on the type in demographic_events)
+    if len(demographic_event_times) == len(demographic_events):
+        desiredOrder = numpy.argsort(demographic_event_times)
+        sorted_demographic_events = []
+        for x in range(len(desiredOrder)):
+            sorted_demographic_events.append(demographic_events[desiredOrder[x]])
+    else:
+        print("Something went horribly wrong: len(demographic_event_times) != len(demographic_events)")
+        sys.exit(1)
 
     # Return a tuple of population_configurations and demographic_events.
-    return population_configurations, demographic_events
+    return population_configurations, sorted_demographic_events
 
 # Import libraries.
 import msprime
@@ -184,31 +309,22 @@ from random import randint
 import datetime
 import re
 import os
+import numpy
 
 # Get the command line arguments.
 tree_file_name = sys.argv[1]
-species_table_file_name = sys.argv[2]
-within_tribe_migration_string = sys.argv[3]
-vcf_outfile_name = sys.argv[4]
+migrationMatrixFile = sys.argv[2]
+vcf_outfile_name = sys.argv[3]
+geneFlowPeriod = 500000 # for now in generations
 
 # Set simulation parameters.
 pop_size = 20000
 generation_time = 3
 #within_tribe_migration = 1e-5
-between_tribe_migration = 0
 mut_rate = 3.5e-9
-chr_length = 100000
+chr_length = 100
 rec_rate = 2.2e-8
 
-# Read the species table.
-table_species_ids = []
-table_tribe_ids = []
-species_table_file = open(species_table_file_name,"r")
-species_table_lines = species_table_file.readlines()
-for line in species_table_lines:
-    line_list = line.split()
-    table_species_ids.append(line_list[0])
-    table_tribe_ids.append(line_list[1])
 
 # Read the species tree string.
 with open(tree_file_name, "r") as f:
@@ -218,45 +334,32 @@ with open(tree_file_name, "r") as f:
 root = newick.loads(species_tree_string)[0]
 species_ids = sorted(root.get_leaf_names())
 
-# Parse the species tree with msprime and generate population configurations and demographic evens.
-parsed_tuple = parse_species_tree(
-    species_tree=species_tree_string,
-    branch_length_units="myr",
-    Ne=pop_size,
-    generation_time=generation_time
-    )
-population_configurations = parsed_tuple[0]
-demographic_events = parsed_tuple[1]
-for n in population_configurations:
-    n.sample_size = 2
 
 # Check if the specified migration rate string is a number or a file name.
 print('Preparing the migration matrix...', end='', flush=True)
-if os.path.isfile(within_tribe_migration_string):
+if os.path.isfile(migrationMatrixFile):
     within_tribe_migrations = []
     # Read the migration rate matrix.
-    with open(within_tribe_migration_string) as f:
+    with open(migrationMatrixFile) as f:
         dsuite_file_lines = f.readlines()
         dsuite_file_species_ids = dsuite_file_lines[0].split()
         migration_matrix = []
         for species1 in species_ids:
             row = []
-            species1_index = table_species_ids.index(species1)
             if species1 in dsuite_file_species_ids:
                 dsuite_species1_index = dsuite_file_species_ids.index(species1)
             else:
                 dsuite_species1_index = None
-            tribe1 = table_tribe_ids[species1_index]
+          
             for species2 in species_ids:
-                species2_index = table_species_ids.index(species2)
                 if species2 in dsuite_file_species_ids:
                     dsuite_species2_index = dsuite_file_species_ids.index(species2)
                 else:
                     dsuite_species2_index = None
-                tribe2 = table_tribe_ids[species2_index]
+   
                 if species1 == species2:
                     row.append(0)
-                elif tribe1 == tribe2:
+                else:
                     if dsuite_species1_index is None or dsuite_species2_index is None:
                         row.append(0)
                     else:
@@ -264,35 +367,38 @@ if os.path.isfile(within_tribe_migration_string):
                         within_tribe_migration = float(row_list[dsuite_species2_index+1]) * 1E-5
                         row.append(within_tribe_migration)
                         within_tribe_migrations.append(within_tribe_migration)
-                else:
-                    row.append(between_tribe_migration)
+
             migration_matrix.append(row)
-    print(" done. Mean within-tribe migration rate is " + str(sum(within_tribe_migrations)/len(within_tribe_migrations)) + ".")
-else:
-    # For each pair of species, set the pairwise migration rate, unless a migration matrix has already been provided.
-    within_tribe_migration = float(within_tribe_migration_string)
-    migration_matrix = []
-    for species1 in species_ids:
-        row = []
-        species1_index = table_species_ids.index(species1)
-        tribe1 = table_tribe_ids[species1_index]
-        for species2 in species_ids:
-            species2_index = table_species_ids.index(species2)
-            tribe2 = table_tribe_ids[species2_index]
-            if species1 == species2:
-                row.append(0)
-            elif tribe1 == tribe2:
-                row.append(within_tribe_migration)
-            else:
-                row.append(between_tribe_migration)
-        migration_matrix.append(row)
-    print(" done.")
+    print(" done. Mean migration rate is " + str(sum(within_tribe_migrations)/len(within_tribe_migrations)) + ".")
+
+    
+print(migration_matrix)
+    
+# Parse the species tree with msprime and generate population configurations and demographic evens.
+parsed_tuple = parse_species_tree(
+    species_tree=species_tree_string,
+    branch_length_units="myr",
+    Ne=pop_size,
+    generation_time=generation_time,
+    migration_matrix=migration_matrix,
+    geneFlowPeriod=geneFlowPeriod
+    )
+population_configurations = parsed_tuple[0]
+demographic_events = parsed_tuple[1]
+for n in population_configurations:
+    n.sample_size = 2
+    
+dd = msprime.DemographyDebugger(
+        population_configurations=parsed_tuple[0],
+        demographic_events=parsed_tuple[1])
+dd.print_history()
+sys.exit(0)
 
 # Write the vcf file.
 print('Simulating with msprime...', end='', flush=True)
 new_tree_sequence_obj = msprime.simulate(
         population_configurations=population_configurations,
-        migration_matrix=migration_matrix,
+       # migration_matrix=migration_matrix,   ### Probably need to feed a matrix of zero migration sorted in the right way
         demographic_events=demographic_events,
         mutation_rate=mut_rate,
         length=chr_length,
