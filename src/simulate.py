@@ -127,6 +127,9 @@ def parse_species_tree(
 
     # Get a list of species IDs.
     species_ids = sorted(root.get_leaf_names())
+    
+    # Create a new matrix which will hold the migration rates for time 0.0 - to be supplied as a param to msprime.simulate
+    timeZero_migration_matrix = [[0.0 for col in range(len(species_ids))] for row in range(len(species_ids))]
 
     # Determine at which time which populations should merge.
     sources = []
@@ -232,41 +235,44 @@ def parse_species_tree(
         
         if geneFlowStart < 0.0:
             geneFlowStart = 0.0
+            for d in allDescendantsOfDestinations[x]:
+                for s in allDescendantsOfSources[x]:
+                    timeZero_migration_matrix[species_ids.index(s)][species_ids.index(d)] = migration_matrix[species_ids.index(s)][species_ids.index(d)]
+                    timeZero_migration_matrix[species_ids.index(d)][species_ids.index(s)] = migration_matrix[species_ids.index(d)][species_ids.index(s)]
+            
  #DEBUG STUFF:
 #        print("geneFlowStart: ")
 #        print(geneFlowStart)
 #
 #        print("")
-        
+        else:
         # Now loop over all descendants of this node which should have gene-flow among them and set that
-        for d in allDescendantsOfDestinations[x]:
-            for s in allDescendantsOfSources[x]:
-    #DEBUG STUFF:
-#               if divergence_times[x] > 1.5:
-#                    print(d)
-#                    print(s)
-#                    print(species_ids[8])
-#                    print(species_ids[67])
-#                    print(species_ids[68])
-#                    sys.exit(1)
-                if migration_matrix[species_ids.index(s)][species_ids.index(d)] > 0.0:
-                    demographic_events.append(
-                    msprime.MigrationRateChange(
-                        time=geneFlowStart*generations_per_branch_length_unit,
-                        rate=migration_matrix[species_ids.index(s)][species_ids.index(d)],
-                        matrix_index=(species_ids.index(s), species_ids.index(d))))
-                    demographic_event_times.append(geneFlowStart)
-                    
-                if migration_matrix[species_ids.index(d)][species_ids.index(s)] > 0.0:
-                    demographic_events.append(
-                    msprime.MigrationRateChange(
-                        time=geneFlowStart*generations_per_branch_length_unit,
-                        rate=migration_matrix[species_ids.index(d)][species_ids.index(s)],
-                        matrix_index=(species_ids.index(d), species_ids.index(s))))
+            for d in allDescendantsOfDestinations[x]:
+                for s in allDescendantsOfSources[x]:
+        #DEBUG STUFF:
+    #               if divergence_times[x] > 1.5:
+    #                    print(d)
+    #                    print(s)
+    #                    print(species_ids[8])
+    #                    print(species_ids[67])
+    #                    print(species_ids[68])
+    #                    sys.exit(1)
+                    if migration_matrix[species_ids.index(s)][species_ids.index(d)] > 0.0:
+                        demographic_events.append(
+                        msprime.MigrationRateChange(
+                            time=geneFlowStart*generations_per_branch_length_unit,
+                            rate=migration_matrix[species_ids.index(s)][species_ids.index(d)],
+                            matrix_index=(species_ids.index(s), species_ids.index(d))))
+                        demographic_event_times.append(geneFlowStart)
                         
-                    demographic_event_times.append(geneFlowStart)
-                    
-                    # Maybe the migration rate chages starting at time 0.0 are better supplied in the initial matrix and not as demographic events???
+                    if migration_matrix[species_ids.index(d)][species_ids.index(s)] > 0.0:
+                        demographic_events.append(
+                        msprime.MigrationRateChange(
+                            time=geneFlowStart*generations_per_branch_length_unit,
+                            rate=migration_matrix[species_ids.index(d)][species_ids.index(s)],
+                            matrix_index=(species_ids.index(d), species_ids.index(s))))
+                            
+                        demographic_event_times.append(geneFlowStart)
                     
                     # Of course better if the rates in internal branches were averages, not just randomply selected 'surviving' ones
         
@@ -297,8 +303,8 @@ def parse_species_tree(
         print("Something went horribly wrong: len(demographic_event_times) != len(demographic_events)")
         sys.exit(1)
 
-    # Return a tuple of population_configurations and demographic_events.
-    return population_configurations, sorted_demographic_events
+    # Return a tuple of population_configurations, demographic_events, and the initial migration_matrix at time 0.0
+    return population_configurations, sorted_demographic_events, timeZero_migration_matrix
 
 # Import libraries.
 import msprime
@@ -315,12 +321,11 @@ import numpy
 tree_file_name = sys.argv[1]
 migrationMatrixFile = sys.argv[2]
 vcf_outfile_name = sys.argv[3]
-geneFlowPeriod = 500000 # for now in generations
+geneFlowPeriod = 1000000 # for now in generations
 
 # Set simulation parameters.
 pop_size = 20000
 generation_time = 3
-#within_tribe_migration = 1e-5
 mut_rate = 3.5e-9
 chr_length = 100
 rec_rate = 2.2e-8
@@ -338,7 +343,7 @@ species_ids = sorted(root.get_leaf_names())
 # Check if the specified migration rate string is a number or a file name.
 print('Preparing the migration matrix...', end='', flush=True)
 if os.path.isfile(migrationMatrixFile):
-    within_tribe_migrations = []
+    migrations = []
     # Read the migration rate matrix.
     with open(migrationMatrixFile) as f:
         dsuite_file_lines = f.readlines()
@@ -364,15 +369,15 @@ if os.path.isfile(migrationMatrixFile):
                         row.append(0)
                     else:
                         row_list = dsuite_file_lines[dsuite_species1_index+1].split()
-                        within_tribe_migration = float(row_list[dsuite_species2_index+1]) * 1E-5
-                        row.append(within_tribe_migration)
-                        within_tribe_migrations.append(within_tribe_migration)
+                        migration = float(row_list[dsuite_species2_index+1]) * 1E-5
+                        row.append(migration)
+                        migrations.append(migration)
 
             migration_matrix.append(row)
-    print(" done. Mean migration rate is " + str(sum(within_tribe_migrations)/len(within_tribe_migrations)) + ".")
+    print(" done. Mean migration rate is " + str(sum(migrations)/len(migrations)) + ".")
 
     
-print(migration_matrix)
+#print(migration_matrix)
     
 # Parse the species tree with msprime and generate population configurations and demographic evens.
 parsed_tuple = parse_species_tree(
@@ -385,20 +390,22 @@ parsed_tuple = parse_species_tree(
     )
 population_configurations = parsed_tuple[0]
 demographic_events = parsed_tuple[1]
+timeZero_migration_matrix = parsed_tuple[2]
 for n in population_configurations:
     n.sample_size = 2
     
 dd = msprime.DemographyDebugger(
         population_configurations=parsed_tuple[0],
-        demographic_events=parsed_tuple[1])
+        demographic_events=parsed_tuple[1],
+        migration_matrix=timeZero_migration_matrix)
 dd.print_history()
-sys.exit(0)
+#sys.exit(0)
 
 # Write the vcf file.
 print('Simulating with msprime...', end='', flush=True)
 new_tree_sequence_obj = msprime.simulate(
         population_configurations=population_configurations,
-       # migration_matrix=migration_matrix,   ### Probably need to feed a matrix of zero migration sorted in the right way
+        migration_matrix=timeZero_migration_matrix,
         demographic_events=demographic_events,
         mutation_rate=mut_rate,
         length=chr_length,
