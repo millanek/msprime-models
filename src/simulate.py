@@ -316,23 +316,26 @@ import datetime
 import re
 import os
 import numpy
+import argparse
 
-# Get the command line arguments.
-tree_file_name = sys.argv[1]
-migrationMatrixFile = sys.argv[2]
-vcf_outfile_name = sys.argv[3]
-geneFlowPeriod = 1000000 # for now in generations
-
-# Set simulation parameters.
-pop_size = 20000
-generation_time = 3
-mut_rate = 3.5e-9
-chr_length = 100
-rec_rate = 2.2e-8
-
+# Get the command line arguments/parameters
+argparser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+                                    description="Build the msprime model and run simulations given a tree and a migration matrix based on f4-ratio statistics produced by Dsuite. ", add_help=True)
+argparser.add_argument("tree", type = str, help="Path to a .newick tree file")
+argparser.add_argument("f4ratios", type=str, help="Path to file containing f4-ratio statitics matrix derived from Dsuite results")
+argparser.add_argument("vcf", type=str, help="Path to the output file which will contain the simulation results")
+argparser.add_argument("-g", "--gen_time", type=float, help="Average generation time in years.", default=3.0)
+argparser.add_argument("-u", "--mut_rate", type=float, help="Mutation rate per bp per generation",default=3.5e-9)
+argparser.add_argument("-r", "--rho", type=float, help="Recombination rate per bp per generation (in the future could use a recombination map); set to 0 to simulate a non-recombining region", default=2.2e-8)
+argparser.add_argument("-N", "--Ne", type=int, help="Effective population size (for now this is the same throughout the tree.", default=20000)
+argparser.add_argument("-l","--chr_length", type=int, help="Length of the 'chromosome' to simulate", default=100)
+argparser.add_argument("-p", "--gene_flow_period", help="How long gene-flow persist after species/populations split (in generations).", type=int, default=1000000)
+argparser.add_argument("-s", "--scaling_factor", help="A scaling factor between the f4-ratios and the msprime migration units", type=float, default=1.0e-5)
+argparser.add_argument("-n", "--num_indiv", help="The number of (diploid) individuals to simulate from each population/species", type=int, default=1)
+args = argparser.parse_args()
 
 # Read the species tree string.
-with open(tree_file_name, "r") as f:
+with open(args.tree, "r") as f:
     species_tree_string = f.read()
 
 # Parse the species tree.
@@ -342,10 +345,10 @@ species_ids = sorted(root.get_leaf_names())
 
 # Check if the specified migration rate string is a number or a file name.
 print('Preparing the migration matrix...', end='', flush=True)
-if os.path.isfile(migrationMatrixFile):
+if os.path.isfile(args.f4ratios):
     migrations = []
     # Read the migration rate matrix.
-    with open(migrationMatrixFile) as f:
+    with open(args.f4ratios) as f:
         dsuite_file_lines = f.readlines()
         dsuite_file_species_ids = dsuite_file_lines[0].split()
         migration_matrix = []
@@ -369,7 +372,7 @@ if os.path.isfile(migrationMatrixFile):
                         row.append(0)
                     else:
                         row_list = dsuite_file_lines[dsuite_species1_index+1].split()
-                        migration = float(row_list[dsuite_species2_index+1]) * 1E-5
+                        migration = float(row_list[dsuite_species2_index+1]) * args.scaling_factor
                         row.append(migration)
                         migrations.append(migration)
 
@@ -383,16 +386,16 @@ if os.path.isfile(migrationMatrixFile):
 parsed_tuple = parse_species_tree(
     species_tree=species_tree_string,
     branch_length_units="myr",
-    Ne=pop_size,
-    generation_time=generation_time,
+    Ne=args.Ne,
+    generation_time=args.gen_time,
     migration_matrix=migration_matrix,
-    geneFlowPeriod=geneFlowPeriod
+    geneFlowPeriod=args.gene_flow_period
     )
 population_configurations = parsed_tuple[0]
 demographic_events = parsed_tuple[1]
 timeZero_migration_matrix = parsed_tuple[2]
 for n in population_configurations:
-    n.sample_size = 2
+    n.sample_size = 2 * args.num_indiv
     
 dd = msprime.DemographyDebugger(
         population_configurations=parsed_tuple[0],
@@ -407,9 +410,9 @@ new_tree_sequence_obj = msprime.simulate(
         population_configurations=population_configurations,
         migration_matrix=timeZero_migration_matrix,
         demographic_events=demographic_events,
-        mutation_rate=mut_rate,
-        length=chr_length,
-        recombination_rate=rec_rate,
+        mutation_rate=args.mut_rate,
+        length=args.chr_length,
+        recombination_rate=args.rho,
         random_seed=random.randint(1, 10000000)
         )
 print(" done.")
@@ -420,11 +423,12 @@ vcf_string = '##fileformat=VCFv4.2\n'
 now = datetime.datetime.now()
 vcf_string += '##fileDate={}\n'.format(now.strftime("%Y%m%d"))
 vcf_string += '##source=c-genie\n'
-vcf_string += '##contig=<ID=1,length={}>\n'.format(chr_length)
+vcf_string += '##contig=<ID=1,length={}>\n'.format(args.chr_length)
 vcf_string += '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
 vcf_string += '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT'
 for sp in range(0,len(species_ids)):
-    vcf_string += '\t{}'.format(species_ids[sp])
+    for i in range(args.num_indiv):
+        vcf_string += '\t{}_{}'.format(species_ids[sp],i)
 vcf_string += '\n'
 
 # Prepare vcf file.
@@ -443,10 +447,14 @@ for variant in new_tree_sequence_obj.variants():
         derivedBase = derivedPossibilities[rd]
         vcf_string += '1\t{}\t.\t{}\t{}\t.\t.\t.\tGT'.format(vp,ancestralBase,derivedBase)
         for sp in range(0,len(species_ids)):
-            vcf_string += '\t{}|{}'.format(variant.genotypes[2*sp],variant.genotypes[(2*sp)+1])
+            for i in range(args.num_indiv):
+                if i == 1:
+                    vcf_string += '\t{}|{}'.format(variant.genotypes[2*args.num_indiv*sp],variant.genotypes[(2*args.num_indiv*sp)+1])
+                else:
+                    vcf_string += '\t{}|{}'.format(variant.genotypes[(2*args.num_indiv*sp)+(i*2)],variant.genotypes[(2*args.num_indiv*sp)+(i*2)+1])
         vcf_string += '\n'
 
 # Write the vcf output file.
-vcf_outfile = open(vcf_outfile_name, 'w')
+vcf_outfile = open(args.vcf, 'w')
 vcf_outfile.write(vcf_string)
 print(" done.")
