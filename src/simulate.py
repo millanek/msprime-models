@@ -332,6 +332,7 @@ argparser.add_argument("-l","--chr_length", type=int, help="Length of the 'chrom
 argparser.add_argument("-p", "--gene_flow_period", help="How long gene-flow persist after species/populations split (in generations).", type=int, default=1000000)
 argparser.add_argument("-s", "--scaling_factor", help="A scaling factor between the f4-ratios and the msprime migration units", type=float, default=1.0e-5)
 argparser.add_argument("-n", "--num_indiv", help="The number of (diploid) individuals to simulate from each population/species", type=int, default=1)
+argparser.add_argument("-d", "--debugger", help="Save the msprime.DemographyDebugger output to FILENAME", type=str, default=None,metavar="FILENAME")
 args = argparser.parse_args()
 
 # Read the species tree string.
@@ -396,12 +397,14 @@ demographic_events = parsed_tuple[1]
 timeZero_migration_matrix = parsed_tuple[2]
 for n in population_configurations:
     n.sample_size = 2 * args.num_indiv
-    
-dd = msprime.DemographyDebugger(
-        population_configurations=parsed_tuple[0],
-        demographic_events=parsed_tuple[1],
-        migration_matrix=timeZero_migration_matrix)
-dd.print_history()
+
+if not args.debugger is None:
+    dd = msprime.DemographyDebugger(
+            population_configurations=parsed_tuple[0],
+            demographic_events=parsed_tuple[1],
+            migration_matrix=timeZero_migration_matrix)
+    dd_outfile = open(args.debugger, 'w')
+    dd.print_history(dd_outfile)
 #sys.exit(0)
 
 # Write the vcf file.
